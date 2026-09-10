@@ -19,6 +19,9 @@ extern const Color COLOR_BLOOD;
 extern const Color COLOR_HP;
 extern const Color COLOR_HP_BG;
 extern const Color COLOR_ENERGY;
+extern const Color COLOR_MANA;
+extern const Color COLOR_SUPREMA;
+extern const Color COLOR_FAITH;
 extern const Color COLOR_DEF;
 extern const Color COLOR_TEXT;
 extern const Color COLOR_TEXT_DIM;
@@ -50,6 +53,8 @@ int ui_button_key(UiButton btn, int key);
 
 void ui_draw_enemy_portrait(Rectangle area, const struct inimigo *e);
 void ui_draw_player_hud(Rectangle area);
+void ui_draw_card(Rectangle r, const CombatCard *card, int selected);
+void ui_draw_budget(Rectangle r, int budget, int max_budget);
 void ui_draw_floating(const FloatingText *arr);
 void ui_draw_damage_flash(float intensity);
 void ui_draw_wrapped_text(Font font, const char *text, Rectangle box, float size, Color color);

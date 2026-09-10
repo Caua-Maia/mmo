@@ -19,6 +19,7 @@ typedef enum {
     SCREEN_ABILITY,
     SCREEN_COMBAT_ITEMS,
     SCREEN_COMBAT_FEEDBACK,
+    SCREEN_FORCE_HIT,
     SCREEN_VICTORY,
     SCREEN_BOSS_ALERT,
     SCREEN_POST_BOSS,
@@ -54,6 +55,10 @@ typedef struct {
     int combat_postura;
     int combat_turno;
     int combat_is_boss;
+    int combat_budget;
+    int combat_skip_enemy;
+    int ask_force;
+    int need_new_hand;
     int awaiting_enemy;
     float feedback_timer;
     char feedback_msg[MSG_LEN];
@@ -110,7 +115,13 @@ static void start_combat(struct inimigo e) {
     app.combat_postura = 0;
     app.combat_turno = 0;
     app.combat_is_boss = e.eh_boss;
+    app.combat_budget = CARD_BUDGET_MAX;
+    app.combat_skip_enemy = 0;
+    app.ask_force = 0;
+    app.need_new_hand = 0;
     app.awaiting_enemy = 0;
+    jogador.suprema = 0;
+    player_cancel_force();
     floating_clear(app.floats);
     set_screen(SCREEN_COMBAT);
 }
@@ -308,22 +319,28 @@ static void update_enter(void) {
 }
 
 static void update_class_select(void) {
-    UiButton g = { { 140, 280, 300, 160 }, "1: Guerreiro", 1 };
-    UiButton l = { { 490, 280, 300, 160 }, "2: Ladino", 1 };
-    UiButton m = { { 840, 280, 300, 160 }, "3: Mago", 1 };
+    UiButton g = { { 140, 220, 460, 130 }, "1: Guerreiro", 1 };
+    UiButton l = { { 680, 220, 460, 130 }, "2: Ladino", 1 };
+    UiButton m = { { 140, 420, 460, 130 }, "3: Mago", 1 };
+    UiButton p = { { 680, 420, 460, 130 }, "4: Paladino", 1 };
 
     BeginDrawing();
     ui_draw_background(GetTime());
-    DrawTextEx(ui_font_title(), "Escolha sua classe", (Vector2){ 420, 100 }, 36, 1, COLOR_GOLD);
+    DrawTextEx(ui_font_title(), "Escolha sua classe", (Vector2){ 420, 80 }, 36, 1, COLOR_GOLD);
+    DrawTextEx(ui_font(), "Paladino e subclasse do Guerreiro: mais vida/MP/defesa, golpes mais lentos, Fe.",
+               (Vector2){ 180, 140 }, 16, 1, COLOR_TEXT_DIM);
 
     if (ui_button_key(g, KEY_ONE)) { aplicar_classe(CLASSE_GUERREIRO); preencher_armas_classe(app.armas); set_screen(SCREEN_WEAPON_SELECT); }
-    DrawTextEx(ui_font(), "Vida e defesa altas,\ngolpe pesado", (Vector2){ 170, 360 }, 16, 1, COLOR_TEXT_DIM);
+    DrawTextEx(ui_font(), "Vida e defesa altas, golpe pesado. Recurso: MP.", (Vector2){ 160, 300 }, 16, 1, COLOR_TEXT_DIM);
 
     if (ui_button_key(l, KEY_TWO)) { aplicar_classe(CLASSE_LADINO); preencher_armas_classe(app.armas); set_screen(SCREEN_WEAPON_SELECT); }
-    DrawTextEx(ui_font(), "Acerto, critico e fuga", (Vector2){ 530, 360 }, 16, 1, COLOR_TEXT_DIM);
+    DrawTextEx(ui_font(), "Acerto, burst e fuga. Recurso: MP.", (Vector2){ 700, 300 }, 16, 1, COLOR_TEXT_DIM);
 
     if (ui_button_key(m, KEY_THREE)) { aplicar_classe(CLASSE_MAGO); preencher_armas_classe(app.armas); set_screen(SCREEN_WEAPON_SELECT); }
-    DrawTextEx(ui_font(), "Magias fortes,\ncorpo fragil", (Vector2){ 890, 360 }, 16, 1, COLOR_TEXT_DIM);
+    DrawTextEx(ui_font(), "Magias fortes, corpo fragil. Recurso: Mana (regenera).", (Vector2){ 160, 500 }, 16, 1, COLOR_TEXT_DIM);
+
+    if (ui_button_key(p, KEY_FOUR)) { aplicar_classe(CLASSE_PALADINO); preencher_armas_classe(app.armas); set_screen(SCREEN_WEAPON_SELECT); }
+    DrawTextEx(ui_font(), "Armas pesadas, iniciativa alta, mecanica de Fe.", (Vector2){ 700, 500 }, 16, 1, COLOR_TEXT_DIM);
 
     ui_draw_vignette();
     EndDrawing();
@@ -351,6 +368,8 @@ static void update_weapon_select(void) {
 
     if (jogador.classe == CLASSE_GUERREIRO)
         DrawTextEx(ui_font(), "Espada: critico. Machado: dano. Maca: +10 DEF.", (Vector2){ 340, 540 }, 18, 1, COLOR_TEXT_DIM);
+    else if (jogador.classe == CLASSE_PALADINO)
+        DrawTextEx(ui_font(), "Armas pesadas: mais custo na mao, golpes mais lentos. Maca: +DEF.", (Vector2){ 280, 540 }, 18, 1, COLOR_TEXT_DIM);
     else if (jogador.classe == CLASSE_LADINO)
         DrawTextEx(ui_font(), "Adaga: crit. Duplas: 2 golpes. Estoque: fuga.", (Vector2){ 340, 540 }, 18, 1, COLOR_TEXT_DIM);
     else
@@ -481,7 +500,26 @@ static void show_feedback(const ActionResult *r, int against_player) {
     }
 }
 
-static void combat_end_check_after_player(int skip_enemy) {
+static void begin_player_turn(void) {
+    app.combat_budget = CARD_BUDGET_MAX;
+    app.combat_skip_enemy = 0;
+    app.ask_force = 0;
+    app.awaiting_enemy = 0;
+    app.need_new_hand = 0;
+    regenerar_mana_turno();
+    player_cancel_force();
+}
+
+static void after_player_card(const ActionResult *r) {
+    if (r->special == 99) {
+        toast(r->msg);
+        set_screen(SCREEN_PATH_CHOICE);
+        return;
+    }
+    if (r->skip_enemy) app.combat_skip_enemy = 1;
+    app.ask_force = r->pending_force ? 1 : 0;
+    if (r->suprema_ready) toast("SUPREMA pronta!");
+    show_feedback(r, 0);
     if (app.enemy.vida <= 0) {
         resolve_victory_flow();
         return;
@@ -490,7 +528,28 @@ static void combat_end_check_after_player(int skip_enemy) {
         set_screen(SCREEN_DEATH);
         return;
     }
-    if (skip_enemy) {
+    if (r->end_player_turn) {
+        app.ask_force = 0;
+        if (app.combat_skip_enemy) {
+            app.awaiting_enemy = 0;
+            app.need_new_hand = 1;
+        } else {
+            app.awaiting_enemy = 1;
+        }
+    } else if (!app.ask_force && app.combat_budget <= 0) {
+        if (app.combat_skip_enemy) {
+            app.awaiting_enemy = 0;
+            app.need_new_hand = 1;
+        } else {
+            app.awaiting_enemy = 1;
+        }
+    }
+}
+
+static void try_end_player_hand(void) {
+    if (app.combat_skip_enemy) {
+        toast("Fumaca: o inimigo nao age");
+        begin_player_turn();
         set_screen(SCREEN_COMBAT);
         return;
     }
@@ -501,6 +560,7 @@ static void do_enemy_turn(void) {
     app.combat_turno++;
     ActionResult r = enemy_attack(&app.enemy, &app.combat_escudo, &app.combat_postura, app.combat_turno);
     app.awaiting_enemy = 0;
+    app.need_new_hand = 1;
     show_feedback(&r, 1);
     app.flash_player = 1;
 }
@@ -517,54 +577,53 @@ static void update_combat(void) {
         app.enemy_turn_delay = 0;
     }
 
-    UiButton atk = { { 80, 520, 200, 56 }, "1: ATACAR", 1 };
-    UiButton hab = { { 300, 520, 200, 56 }, "2: HABILIDADE", 1 };
-    UiButton item = { { 520, 520, 200, 56 }, "3: ITEM", 1 };
-    UiButton fugir = { { 740, 520, 200, 56 },
-        app.combat_is_boss ? "4: (sem fuga)" : "4: FUGIR",
-        app.combat_is_boss ? 0 : 1 };
+    CombatCard hand[HAND_MAX];
+    int nhand = montar_mao(hand, HAND_MAX, app.combat_budget, app.combat_is_boss);
+    int i;
+    float card_w = nhand > 7 ? 132.0f : 150.0f;
+    float gap = 8.0f;
+    float total_w = nhand * card_w + (nhand > 0 ? (nhand - 1) * gap : 0);
+    float start_x = (SCREEN_W - total_w) / 2.0f;
+    if (start_x < 40) start_x = 40;
 
     BeginDrawing();
     ui_draw_background(GetTime());
 
     if (app.combat_is_boss)
-        ui_draw_panel_boss((Rectangle){ 60, 40, SCREEN_W - 120.0f, 450 }, "COMBATE — BOSS");
+        ui_draw_panel_boss((Rectangle){ 60, 24, SCREEN_W - 120.0f, 400 }, "COMBATE — BOSS");
     else
-        ui_draw_panel((Rectangle){ 60, 40, SCREEN_W - 120.0f, 450 }, "COMBATE");
+        ui_draw_panel((Rectangle){ 60, 24, SCREEN_W - 120.0f, 400 }, "COMBATE");
 
-    ui_draw_player_hud((Rectangle){ 90, 80, 420, 200 });
-    ui_draw_enemy_portrait((Rectangle){ SCREEN_W - 520.0f, 80, 400, 320 }, &app.enemy);
+    ui_draw_player_hud((Rectangle){ 90, 56, 420, 250 });
+    ui_draw_enemy_portrait((Rectangle){ SCREEN_W - 520.0f, 56, 400, 300 }, &app.enemy);
+    ui_draw_budget((Rectangle){ 90, 318, 300, 22 }, app.combat_budget, CARD_BUDGET_MAX);
 
     if (!app.awaiting_enemy) {
-        if (ui_button_key(atk, KEY_ONE)) {
-            ActionResult r = player_basic_attack(&app.enemy);
-            show_feedback(&r, 0);
-            combat_end_check_after_player(0);
-            /* show_feedback already changed screen; mark enemy turn after feedback */
-            if (app.enemy.vida > 0 && jogador.vida > 0) app.awaiting_enemy = 1;
-        }
-        if (ui_button_key(hab, KEY_TWO)) set_screen(SCREEN_ABILITY);
-        if (ui_button_key(item, KEY_THREE)) set_screen(SCREEN_COMBAT_ITEMS);
-        if (!app.combat_is_boss && ui_button_key(fugir, KEY_FOUR)) {
-            char msg[MSG_LEN];
-            if (tentar_fugir(msg, sizeof(msg))) {
-                toast(msg);
-                set_screen(SCREEN_PATH_CHOICE);
-            } else {
-                ActionResult r = {0};
-                snprintf(r.msg, MSG_LEN, "%s", msg);
-                show_feedback(&r, 1);
-                app.awaiting_enemy = 1;
+        for (i = 0; i < nhand; i++) {
+            Rectangle cr = { start_x + i * (card_w + gap), 440, card_w, 168 };
+            ui_draw_card(cr, &hand[i], 0);
+            {
+                char num[8];
+                snprintf(num, sizeof(num), "%d", i + 1);
+                DrawTextEx(ui_font(), num, (Vector2){ cr.x + 8, cr.y + cr.height - 22 }, 16, 1, COLOR_GOLD);
             }
-        } else if (app.combat_is_boss && IsKeyPressed(KEY_FOUR)) {
-            ActionResult r = {0};
-            snprintf(r.msg, MSG_LEN, "Voce nao pode fugir dessa vez :)");
-            show_feedback(&r, 0);
-            /* não gasta turno inimigo no original? Na verdade só mostra e continua — inimigo não age no original quando tenta fugir de boss */
-            app.awaiting_enemy = 0;
-            set_screen(SCREEN_COMBAT);
-            toast("Voce nao pode fugir dessa vez :)");
+            int key = (i < 9) ? (KEY_ONE + i) : 0;
+            int clicked = CheckCollisionPointRec(GetMousePosition(), cr) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
+            int keyed = key && IsKeyPressed(key);
+            if ((clicked || keyed) && hand[i].enabled) {
+                ActionResult r = player_play_card(&app.enemy, &hand[i], &app.combat_escudo, &app.combat_postura, &app.combat_budget);
+                if (!r.spent_turn) toast(r.msg);
+                else after_player_card(&r);
+            }
         }
+        {
+            UiButton endt = { { SCREEN_W - 280.0f, 318, 200, 36 }, "0: Encerrar turno", 1 };
+            if (ui_button_key(endt, KEY_ZERO) || IsKeyPressed(KEY_ENTER)) {
+                try_end_player_hand();
+            }
+        }
+    } else {
+        DrawTextEx(ui_font(), "O inimigo se prepara...", (Vector2){ 480, 500 }, 20, 1, COLOR_BLOOD);
     }
 
     floating_update(app.floats, GetFrameTime());
@@ -572,6 +631,38 @@ static void update_combat(void) {
     if (app.damage_flash > 0) {
         ui_draw_damage_flash(app.damage_flash);
         app.damage_flash -= GetFrameTime();
+    }
+    draw_toast();
+    ui_draw_vignette();
+    EndDrawing();
+}
+
+static void update_force_hit(void) {
+    char line[96];
+    snprintf(line, sizeof(line), "Forcar acerto custa +%d (sem multiplicador de dano).", FORCE_HIT_COST);
+    UiButton yes = { { 300, 400, 320, 56 }, "1: Forcar acerto", app.combat_budget >= FORCE_HIT_COST };
+    UiButton no = { { 660, 400, 320, 56 }, "2: Desistir do golpe", 1 };
+
+    BeginDrawing();
+    ui_draw_background(GetTime());
+    ui_draw_panel((Rectangle){ 240, 160, 800, 360 }, "FALHA NO ACERTO");
+    DrawTextEx(ui_font_title(), "A primeira rolagem falhou", (Vector2){ 360, 220 }, 28, 1, COLOR_GOLD);
+    DrawTextEx(ui_font(), line, (Vector2){ 320, 280 }, 18, 1, COLOR_TEXT);
+    {
+        char b[48];
+        snprintf(b, sizeof(b), "Orcamento restante: %d", app.combat_budget);
+        DrawTextEx(ui_font(), b, (Vector2){ 480, 320 }, 18, 1, COLOR_GOLD_DIM);
+    }
+    if (ui_button_key(yes, KEY_ONE)) {
+        ActionResult r = player_force_pending(&app.enemy, &app.combat_escudo, &app.combat_postura, &app.combat_budget);
+        if (!r.spent_turn) toast(r.msg);
+        else after_player_card(&r);
+    }
+    if (ui_button_key(no, KEY_TWO)) {
+        player_cancel_force();
+        app.ask_force = 0;
+        if (app.combat_budget <= 0) app.awaiting_enemy = 1;
+        set_screen(SCREEN_COMBAT);
     }
     ui_draw_vignette();
     EndDrawing();
@@ -605,8 +696,8 @@ static void update_ability(void) {
     ui_draw_panel((Rectangle){ 300, 100, 680, 480 }, "HABILIDADES");
     {
         char e[40];
-        snprintf(e, sizeof(e), "Energia: %d/%d", jogador.energia, jogador.energia_max);
-        DrawTextEx(ui_font(), e, (Vector2){ 420, 150 }, 20, 1, COLOR_ENERGY);
+        snprintf(e, sizeof(e), "%s: %d/%d", nome_recurso(), jogador.energia, jogador.energia_max);
+        DrawTextEx(ui_font(), e, (Vector2){ 420, 150 }, 20, 1, usa_mana() ? COLOR_MANA : COLOR_ENERGY);
     }
 
     int choice = 0;
@@ -675,14 +766,14 @@ static void update_combat_feedback(void) {
         ui_draw_panel_boss((Rectangle){ 60, 40, SCREEN_W - 120.0f, 450 }, "COMBATE — BOSS");
     else
         ui_draw_panel((Rectangle){ 60, 40, SCREEN_W - 120.0f, 450 }, "COMBATE");
-    ui_draw_player_hud((Rectangle){ 90, 80, 420, 200 });
-    ui_draw_enemy_portrait((Rectangle){ SCREEN_W - 520.0f, 80, 400, 320 }, &app.enemy);
+    ui_draw_player_hud((Rectangle){ 90, 56, 420, 250 });
+    ui_draw_enemy_portrait((Rectangle){ SCREEN_W - 520.0f, 56, 400, 300 }, &app.enemy);
 
-    Rectangle banner = { 340, 480, 600, 100 };
+    Rectangle banner = { 340, 520, 600, 100 };
     ui_draw_panel(banner, NULL);
-    DrawTextEx(ui_font(), app.feedback_msg, (Vector2){ 370, 505 }, 22, 1, COLOR_GOLD);
+    DrawTextEx(ui_font(), app.feedback_msg, (Vector2){ 370, 545 }, 22, 1, COLOR_GOLD);
     if (app.feedback_msg2[0])
-        DrawTextEx(ui_font(), app.feedback_msg2, (Vector2){ 370, 540 }, 18, 1, COLOR_TEXT);
+        DrawTextEx(ui_font(), app.feedback_msg2, (Vector2){ 370, 580 }, 18, 1, COLOR_TEXT);
 
     ui_draw_floating(app.floats);
     ui_draw_damage_flash(app.damage_flash);
@@ -692,7 +783,11 @@ static void update_combat_feedback(void) {
     if (app.feedback_timer <= 0) {
         if (app.enemy.vida <= 0) resolve_victory_flow();
         else if (jogador.vida <= 0) set_screen(SCREEN_DEATH);
-        else set_screen(SCREEN_COMBAT);
+        else if (app.ask_force && force_pending.active) set_screen(SCREEN_FORCE_HIT);
+        else {
+            if (app.need_new_hand) begin_player_turn();
+            set_screen(SCREEN_COMBAT);
+        }
     }
 }
 
@@ -1023,12 +1118,14 @@ static void update_status(void) {
     ui_draw_panel((Rectangle){ 300, 80, 680, 460 }, "STATUS");
     char buf[512];
     snprintf(buf, sizeof(buf),
-        "Level: %d\nClasse: %s\nVida: %d/%d\nEnergia: %d/%d\nEXP: %d/%d\n"
-        "DEF: %d/%d\nATK: %d\nAcerto extra: +%d\nArma: %s\nMoedas: R$ %.2f",
+        "Level: %d\nClasse: %s\nVida: %d/%d\n%s: %d/%d\nSuprema: %d/%d\nFe: %d/%d\nEXP: %d/%d\n"
+        "DEF: %d/%d\nATK: %d\nAcerto extra: +%d\nIniciativa: %d\nArma: %s\nMoedas: R$ %.2f",
         jogador.nivel, jogador.nome_classe, jogador.vida, jogador.vida_max,
-        jogador.energia, jogador.energia_max, jogador.xp, jogador.xp_para_proximo,
+        nome_recurso(), jogador.energia, jogador.energia_max,
+        jogador.suprema, SUPREMA_MAX, jogador.fe, FE_MAX,
+        jogador.xp, jogador.xp_para_proximo,
         jogador.def, jogador.def_max, jogador.arma.dano, jogador.bonus_acerto,
-        jogador.arma.nome, jogador.moeda);
+        jogador.iniciativa, jogador.arma.nome, jogador.moeda);
     ui_draw_wrapped_text(ui_font(), buf, (Rectangle){ 360, 140, 560, 360 }, 22, COLOR_TEXT);
     if (ui_button_key(back, KEY_ZERO)) set_screen(app.return_to ? app.return_to : SCREEN_PATH_CHOICE);
     ui_draw_vignette();
@@ -1080,6 +1177,7 @@ int main(void) {
             case SCREEN_ABILITY: update_ability(); break;
             case SCREEN_COMBAT_ITEMS: update_combat_items(); break;
             case SCREEN_COMBAT_FEEDBACK: update_combat_feedback(); break;
+            case SCREEN_FORCE_HIT: update_force_hit(); break;
             case SCREEN_VICTORY: update_victory(); break;
             case SCREEN_LEVEL_UP_BANNER: update_level_banner(); break;
             case SCREEN_LEVEL_REWARD: update_level_reward(); break;

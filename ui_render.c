@@ -14,6 +14,9 @@ const Color COLOR_BLOOD       = { 140, 24, 28, 255 };
 const Color COLOR_HP          = { 160, 36, 36, 255 };
 const Color COLOR_HP_BG       = { 40, 18, 18, 255 };
 const Color COLOR_ENERGY      = { 200, 120, 40, 255 };
+const Color COLOR_MANA        = { 70, 120, 200, 255 };
+const Color COLOR_SUPREMA     = { 160, 80, 180, 255 };
+const Color COLOR_FAITH       = { 230, 210, 140, 255 };
 const Color COLOR_DEF         = { 90, 120, 150, 255 };
 const Color COLOR_TEXT        = { 210, 198, 170, 255 };
 const Color COLOR_TEXT_DIM    = { 140, 130, 110, 255 };
@@ -251,27 +254,69 @@ void ui_draw_enemy_portrait(Rectangle area, const struct inimigo *e) {
 
 void ui_draw_player_hud(Rectangle area) {
     char buf[80];
+    Color rec_color = usa_mana() ? COLOR_MANA : COLOR_ENERGY;
     ui_draw_panel(area, "AVENTUREIRO");
 
     snprintf(buf, sizeof(buf), "%s  Nv.%d", jogador.nome_classe, jogador.nivel);
     DrawTextEx(g_font, buf, (Vector2){ area.x + 20, area.y + 36 }, 18, 1, COLOR_TEXT);
 
     snprintf(buf, sizeof(buf), "HP %d/%d", jogador.vida, jogador.vida_max);
-    ui_draw_bar((Rectangle){ area.x + 20, area.y + 70, area.width - 40, 22 },
+    ui_draw_bar((Rectangle){ area.x + 20, area.y + 66, area.width - 40, 20 },
                 jogador.vida_max ? (float)jogador.vida / jogador.vida_max : 0,
                 COLOR_HP, COLOR_HP_BG, buf);
 
-    snprintf(buf, sizeof(buf), "ENERGIA %d/%d", jogador.energia, jogador.energia_max);
-    ui_draw_bar((Rectangle){ area.x + 20, area.y + 100, area.width - 40, 22 },
+    snprintf(buf, sizeof(buf), "%s %d/%d", nome_recurso(), jogador.energia, jogador.energia_max);
+    ui_draw_bar((Rectangle){ area.x + 20, area.y + 92, area.width - 40, 20 },
                 jogador.energia_max ? (float)jogador.energia / jogador.energia_max : 0,
-                COLOR_ENERGY, (Color){ 40, 28, 14, 255 }, buf);
+                rec_color, (Color){ 40, 28, 14, 255 }, buf);
+
+    snprintf(buf, sizeof(buf), "SUPREMA %d/%d", jogador.suprema, SUPREMA_MAX);
+    ui_draw_bar((Rectangle){ area.x + 20, area.y + 118, area.width - 40, 18 },
+                (float)jogador.suprema / SUPREMA_MAX,
+                COLOR_SUPREMA, (Color){ 30, 16, 36, 255 }, buf);
+
+    if (jogador.classe == CLASSE_PALADINO) {
+        snprintf(buf, sizeof(buf), "FE %d/%d", jogador.fe, FE_MAX);
+        ui_draw_bar((Rectangle){ area.x + 20, area.y + 142, area.width - 40, 16 },
+                    (float)jogador.fe / FE_MAX,
+                    COLOR_FAITH, (Color){ 40, 34, 18, 255 }, buf);
+    }
 
     snprintf(buf, sizeof(buf), "DEF %d/%d   ATK %d   R$ %.0f",
              jogador.def, jogador.def_max, jogador.arma.dano, jogador.moeda);
-    DrawTextEx(g_font, buf, (Vector2){ area.x + 20, area.y + 136 }, 16, 1, COLOR_TEXT_DIM);
+    DrawTextEx(g_font, buf, (Vector2){ area.x + 20, area.y + area.height - 52 }, 16, 1, COLOR_TEXT_DIM);
 
     snprintf(buf, sizeof(buf), "Arma: %s", jogador.arma.nome);
-    DrawTextEx(g_font, buf, (Vector2){ area.x + 20, area.y + 158 }, 16, 1, COLOR_GOLD_DIM);
+    DrawTextEx(g_font, buf, (Vector2){ area.x + 20, area.y + area.height - 32 }, 16, 1, COLOR_GOLD_DIM);
+}
+
+void ui_draw_budget(Rectangle r, int budget, int max_budget) {
+    char buf[48];
+    float ratio = max_budget > 0 ? (float)budget / max_budget : 0;
+    snprintf(buf, sizeof(buf), "MAO  %d / %d", budget, max_budget);
+    ui_draw_bar(r, ratio, COLOR_GOLD, (Color){ 40, 32, 18, 255 }, buf);
+}
+
+void ui_draw_card(Rectangle r, const CombatCard *card, int selected) {
+    Color fill = card->enabled ? COLOR_BTN : (Color){ 28, 24, 20, 255 };
+    Color border = COLOR_BTN_BORDER;
+    if (selected) {
+        fill = COLOR_BTN_HOVER;
+        border = COLOR_GOLD;
+    }
+    if (card->kind == CARD_SUPREME) {
+        fill = (Color){ 48, 28, 55, 255 };
+        border = COLOR_SUPREMA;
+    }
+    if (CheckCollisionPointRec(GetMousePosition(), r) && card->enabled)
+        fill = COLOR_BTN_HOVER;
+
+    DrawRectangleRec(r, fill);
+    DrawRectangleLinesEx(r, selected ? 3 : 2, border);
+    DrawTextEx(g_font, card->label, (Vector2){ r.x + 8, r.y + 8 }, 16, 1,
+               card->enabled ? COLOR_GOLD : COLOR_TEXT_DIM);
+    ui_draw_wrapped_text(g_font, card->hint, (Rectangle){ r.x + 8, r.y + 32, r.width - 16, r.height - 40 },
+                         13, COLOR_TEXT_DIM);
 }
 
 void ui_draw_floating(const FloatingText *arr) {

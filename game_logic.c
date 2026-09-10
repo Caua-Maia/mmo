@@ -9,6 +9,8 @@ int niveis_desde_boss = 0;
 int fugas_totais = 0;
 int bosses_derrotados[QTD_BOSSES];
 int boss_derrotado = 0;
+ForcePending force_pending;
+static int boss_alerta_suprema = 0;
 
 int d20(void) {
     return rand() % 20 + 1;
@@ -29,11 +31,103 @@ int reduzir_dano(int dano, int defesa) {
     return r < 1 ? 1 : r;
 }
 
+int usa_mana(void) {
+    return jogador.classe == CLASSE_MAGO;
+}
+
+const char *nome_recurso(void) {
+    return usa_mana() ? "Mana" : "MP";
+}
+
+int custo_carta_golpe(void) {
+    int c = (jogador.classe == CLASSE_PALADINO) ? 5 : 4;
+    c += jogador.arma.custo_carta;
+    if (c < 1) c = 1;
+    if (c > 9) c = 9;
+    return c;
+}
+
+void regenerar_recurso(int qtd) {
+    if (qtd <= 0) return;
+    jogador.energia += qtd;
+    if (jogador.energia > jogador.energia_max) jogador.energia = jogador.energia_max;
+}
+
+void regenerar_mana_turno(void) {
+    if (usa_mana()) regenerar_recurso(1);
+}
+
+void suprema_ganhar(int n) {
+    int antes;
+    if (n <= 0) return;
+    antes = jogador.suprema;
+    if (jogador.classe == CLASSE_PALADINO) {
+        jogador.fe += n / 2;
+        if (jogador.fe > FE_MAX) jogador.fe = FE_MAX;
+        n += jogador.fe / 25;
+    }
+    jogador.suprema += n;
+    if (jogador.suprema > SUPREMA_MAX) jogador.suprema = SUPREMA_MAX;
+    if (antes < SUPREMA_MAX && jogador.suprema >= SUPREMA_MAX)
+        boss_alerta_suprema = 1;
+}
+
+int suprema_pronta(void) {
+    return jogador.suprema >= SUPREMA_MAX;
+}
+
+static int miss_min_jogador(void) {
+    int miss_min = 4;
+    if (jogador.classe == CLASSE_LADINO) miss_min = 3;
+    if (jogador.classe == CLASSE_MAGO) miss_min = 5;
+    if (jogador.classe == CLASSE_PALADINO) miss_min = 3;
+    miss_min -= jogador.bonus_acerto;
+    if (miss_min < 2) miss_min = 2;
+    return miss_min;
+}
+
+/* 1-8 x1, 9-14 x1.5, 15-18 x2, 19-20 x3 */
+static int multiplicador_x10(int roll) {
+    if (roll >= 19) return 30;
+    if (roll >= 15) return 20;
+    if (roll >= 9) return 15;
+    return 10;
+}
+
+static void aplicar_hits_arma(struct inimigo *e, int base, float escala, int force,
+                              int *total, int *best_mult, int *any_hit) {
+    int h;
+    int miss_min = miss_min_jogador();
+    *total = 0;
+    *best_mult = 10;
+    *any_hit = 0;
+    for (h = 0; h < jogador.arma.hits; h++) {
+        int dmg, mx;
+        if (!force) {
+            int roll = d20();
+            if (roll < miss_min) continue;
+            mx = multiplicador_x10(d20());
+        } else {
+            mx = 10;
+        }
+        dmg = (int)((base * mx) / 10 * escala);
+        if (dmg < 1) dmg = 1;
+        dmg = reduzir_dano(dmg, e->defesa);
+        e->vida -= dmg;
+        if (e->vida < 0) e->vida = 0;
+        *total += dmg;
+        *any_hit = 1;
+        if (mx > *best_mult) *best_mult = mx;
+        if (mx >= 20 && !usa_mana()) regenerar_recurso(1);
+        if (e->vida <= 0) break;
+    }
+}
+
 const char *nome_item(ItemId id) {
     switch (id) {
         case POCAO_VIDA: return "Pocao de Vida";
         case PEDACO_ARMADURA: return "Pedaco de Armadura";
-        case POCAO_ENERGIA: return "Pocao de Energia";
+        case POCAO_ENERGIA: return usa_mana() ? "Pocao de Mana" : "Pocao de MP";
         case BOMBA: return "Bomba";
         default: return "";
     }
@@ -43,7 +137,7 @@ const char *desc_item(ItemId id) {
     switch (id) {
         case POCAO_VIDA: return "Cura 30% da vida maxima (min. 15).";
         case PEDACO_ARMADURA: return "Repara +10 DEF ou reforca DEF max +2.";
-        case POCAO_ENERGIA: return "Recupera +3 pontos de energia.";
+        case POCAO_ENERGIA: return usa_mana() ? "Recupera +3 de Mana." : "Recupera +3 de MP.";
         case BOMBA: return "Causa 20 + 2*nivel de dano (so em combate).";
         default: return "";
     }
@@ -99,6 +193,7 @@ void aplicar_classe(Classe c) {
             jogador.vida_max = 120;
             jogador.def_max = 60;
             jogador.energia_max = 5;
+            jogador.iniciativa = 8;
             break;
         case CLASSE_LADINO:
             strcpy(jogador.nome_classe, "Ladino");
@@ -106,12 +201,22 @@ void aplicar_classe(Classe c) {
             jogador.def_max = 35;
             jogador.energia_max = 7;
             jogador.bonus_acerto = 1;
+            jogador.iniciativa = 12;
             break;
         case CLASSE_MAGO:
             strcpy(jogador.nome_classe, "Mago");
             jogador.vida_max = 75;
             jogador.def_max = 25;
             jogador.energia_max = 10;
+            jogador.iniciativa = 7;
+            break;
+        case CLASSE_PALADINO:
+            strcpy(jogador.nome_classe, "Paladino");
+            jogador.vida_max = 140;
+            jogador.def_max = 75;
+            jogador.energia_max = 7;
+            jogador.bonus_acerto = 1;
+            jogador.iniciativa = 14;
             break;
         default:
             break;
@@ -120,6 +225,8 @@ void aplicar_classe(Classe c) {
     jogador.vida = jogador.vida_max;
     jogador.def = jogador.def_max;
     jogador.energia = jogador.energia_max;
+    jogador.suprema = 0;
+    jogador.fe = 0;
     for (s = 0; s < MOCHILA_TAM; s++) {
         jogador.mochila[s].id = ITEM_VAZIO;
         jogador.mochila[s].qtd = 0;
@@ -143,6 +250,17 @@ void preencher_armas_classe(struct arma out[3]) {
         strcpy(out[2].nome, "Maca e Escudo");
         out[2].dano = 14;
         out[2].bonus_def = 10;
+    } else if (jogador.classe == CLASSE_PALADINO) {
+        strcpy(out[0].nome, "Espada Grande");
+        out[0].dano = 14;
+        out[0].custo_carta = 1;
+        strcpy(out[1].nome, "Maca");
+        out[1].dano = 12;
+        out[1].bonus_def = 8;
+        out[1].custo_carta = 1;
+        strcpy(out[2].nome, "Martelo");
+        out[2].dano = 16;
+        out[2].custo_carta = 2;
     } else if (jogador.classe == CLASSE_LADINO) {
         strcpy(out[0].nome, "Adaga");
         out[0].dano = 13;
@@ -219,12 +337,12 @@ int usar_item_slot(int indice, struct inimigo *alvo, int em_combate, char *messa
 
         case POCAO_ENERGIA:
             if (jogador.energia >= jogador.energia_max) {
-                if (message) snprintf(message, msg_len, "Sua energia esta cheia!");
+                if (message) snprintf(message, msg_len, "Seu %s esta cheio!", nome_recurso());
                 return 0;
             }
             jogador.energia += 3;
             if (jogador.energia > jogador.energia_max) jogador.energia = jogador.energia_max;
-            if (message) snprintf(message, msg_len, "Energia restaurada.");
+            if (message) snprintf(message, msg_len, "%s restaurado.", nome_recurso());
             consumir_slot(indice);
             return 1;
 
@@ -256,6 +374,8 @@ static void aplicar_dano_jogador_logic(int dano, int *escudo, int *postura, Acti
         snprintf(out->msg, MSG_LEN, "O escudo arcano absorveu!");
         *escudo = 0;
         out->damage = 0;
+        if (!usa_mana()) regenerar_recurso(1);
+        suprema_ganhar(10);
         return;
     }
     final = reduzir_dano(dano, jogador.def);
@@ -263,64 +383,65 @@ static void aplicar_dano_jogador_logic(int dano, int *escudo, int *postura, Acti
         final = final / 2;
         if (final < 1) final = 1;
         *postura = 0;
+        if (!usa_mana()) regenerar_recurso(1);
+        suprema_ganhar(10);
     }
     jogador.vida -= final;
     if (jogador.vida < 0) jogador.vida = 0;
     out->damage = final;
     snprintf(out->msg2, MSG_LEN, "Voce sofreu %d de dano", final);
+    suprema_ganhar(8);
+}
+
+static void preencher_dano_msg(ActionResult *r, const char *nome, int force) {
+    if (r->miss) {
+        if (!force) {
+            r->pending_force = 1;
+            snprintf(r->msg, MSG_LEN, "%s errou. Forcar acerto: +%d de custo.", nome, FORCE_HIT_COST);
+        } else {
+            snprintf(r->msg, MSG_LEN, "%s falhou", nome);
+        }
+        return;
+    }
+    if (force) {
+        r->forced = 1;
+        snprintf(r->msg, MSG_LEN, "%s forcado! -%d (dano base)", nome, r->damage);
+        return;
+    }
+    if (r->mult_x10 >= 30) {
+        r->crit = 1;
+        snprintf(r->msg, MSG_LEN, "%s x3! -%d", nome, r->damage);
+    } else if (r->mult_x10 >= 20) {
+        r->crit = 1;
+        snprintf(r->msg, MSG_LEN, "%s x2! -%d", nome, r->damage);
+    } else if (r->mult_x10 >= 15) {
+        snprintf(r->msg, MSG_LEN, "%s x1.5! -%d", nome, r->damage);
+    } else {
+        snprintf(r->msg, MSG_LEN, "%s! -%d", nome, r->damage);
+    }
+}
+
+static ActionResult resolver_golpe_arma(struct inimigo *e, const char *nome, float escala, int force) {
+    ActionResult r = empty_result();
+    int total = 0, best = 10, hit = 0;
+    r.spent_turn = 1;
+    aplicar_hits_arma(e, jogador.arma.dano, escala, force, &total, &best, &hit);
+    r.damage = total;
+    r.mult_x10 = best;
+    r.miss = !hit;
+    r.crit = best >= 20;
+    preencher_dano_msg(&r, nome, force);
+    if (hit) {
+        suprema_ganhar(12);
+        if (best >= 20) suprema_ganhar(8);
+    }
+    if (r.pending_force) r.suprema_ready = 0;
+    if (suprema_pronta()) r.suprema_ready = 1;
+    return r;
 }
 
 ActionResult player_basic_attack(struct inimigo *e) {
-    ActionResult r = empty_result();
-    int h;
-    int miss_min = 4;
-    int total_dmg = 0;
-    int any_hit = 0;
-    int any_crit = 0;
-    int any_miss = 0;
-
-    if (jogador.classe == CLASSE_LADINO) miss_min = 3;
-    if (jogador.classe == CLASSE_MAGO) miss_min = 5;
-    miss_min -= jogador.bonus_acerto;
-    if (miss_min < 2) miss_min = 2;
-
-    r.spent_turn = 1;
-
-    for (h = 0; h < jogador.arma.hits; h++) {
-        int roll = d20();
-        int crit = (roll == 20 || roll >= jogador.arma.crit_min);
-        int dmg;
-
-        if (roll < miss_min) {
-            any_miss = 1;
-            continue;
-        }
-
-        dmg = jogador.arma.dano;
-        if (crit) {
-            dmg *= 2;
-            any_crit = 1;
-        }
-        if (dmg < 1) dmg = 1;
-        dmg = reduzir_dano(dmg, e->defesa);
-        e->vida -= dmg;
-        if (e->vida < 0) e->vida = 0;
-        total_dmg += dmg;
-        any_hit = 1;
-        if (e->vida <= 0) break;
-    }
-
-    r.damage = total_dmg;
-    r.crit = any_crit;
-    r.miss = any_miss && !any_hit;
-    if (r.miss) {
-        snprintf(r.msg, MSG_LEN, "Voce errou o ataque");
-    } else if (any_crit) {
-        snprintf(r.msg, MSG_LEN, "Dano Critico! -%d", total_dmg);
-    } else {
-        snprintf(r.msg, MSG_LEN, "Voce acertou! -%d", total_dmg);
-    }
-    return r;
+    return resolver_golpe_arma(e, "Golpe", 1.0f, 0);
 }
 
 ActionResult player_ability(struct inimigo *e, int escolha, int *escudo, int *postura) {
@@ -506,6 +627,343 @@ ActionResult player_ability(struct inimigo *e, int escolha, int *escudo, int *po
     return r;
 }
 
+static void add_card(CombatCard *out, int *n, int max, CardKind kind, int item_slot,
+                     int cost, int mp, int budget, const char *label, const char *hint) {
+    CombatCard *c;
+    if (*n >= max) return;
+    c = &out[*n];
+    memset(c, 0, sizeof(*c));
+    c->kind = kind;
+    c->item_slot = item_slot;
+    c->cost = cost;
+    c->mp_cost = mp;
+    c->enabled = (budget >= cost) && (jogador.energia >= mp);
+    strncpy(c->label, label, sizeof(c->label) - 1);
+    strncpy(c->hint, hint, sizeof(c->hint) - 1);
+    (*n)++;
+}
+
+int montar_mao(CombatCard *out, int max, int budget, int is_boss) {
+    int n = 0, s, itens = 0;
+    int c3 = custo_energia(3), c2 = custo_energia(2);
+    char lab[40];
+    int gc = custo_carta_golpe();
+
+    snprintf(lab, sizeof(lab), "Golpe  [%d]", gc);
+    add_card(out, &n, max, CARD_STRIKE, -1, gc, 0, budget, lab, "Ataque com arma (acerto + multiplicador)");
+
+    if (jogador.classe == CLASSE_GUERREIRO) {
+        snprintf(lab, sizeof(lab), "Pesado [%d/%s%d]", 6, usa_mana() ? "M" : "MP", c3);
+        add_card(out, &n, max, CARD_SKILL_1, -1, 6, c3, budget, lab, "Golpe pesado (x2.2)");
+        snprintf(lab, sizeof(lab), "Postura [%d/%s%d]", 3, "MP", c2);
+        add_card(out, &n, max, CARD_SKILL_2, -1, 3, c2, budget, lab, "Bloqueia metade do proximo dano");
+        add_card(out, &n, max, CARD_SKILL_3, -1, 2, 0, budget, "Descanso [2]", "Recupera +2 MP");
+    } else if (jogador.classe == CLASSE_PALADINO) {
+        snprintf(lab, sizeof(lab), "Julgar [%d/MP%d]", 5, c2);
+        add_card(out, &n, max, CARD_SKILL_1, -1, 5, c2, budget, lab, "Golpe sagrado (escala com Fe)");
+        add_card(out, &n, max, CARD_SKILL_2, -1, 3, 0, budget, "Oracao [3]", "Ganha Fe e cura leve");
+        add_card(out, &n, max, CARD_SKILL_3, -1, 2, 0, budget, "Descanso [2]", "Recupera +2 MP");
+    } else if (jogador.classe == CLASSE_LADINO) {
+        snprintf(lab, sizeof(lab), "Punhal [%d/MP%d]", 4, c2);
+        add_card(out, &n, max, CARD_SKILL_1, -1, 4, c2, budget, lab, "Punhalada precisa");
+        snprintf(lab, sizeof(lab), "Fumaca [%d/MP%d]", 5, c2);
+        add_card(out, &n, max, CARD_SKILL_2, -1, 5, c2, budget, lab, "Pula o turno do inimigo");
+        add_card(out, &n, max, CARD_SKILL_3, -1, 2, 0, budget, "Descanso [2]", "Recupera +2 MP");
+    } else {
+        snprintf(lab, sizeof(lab), "Fogo [%d/Mn%d]", 6, c3);
+        add_card(out, &n, max, CARD_SKILL_1, -1, 6, c3, budget, lab, "Bola de fogo (ignora DEF)");
+        snprintf(lab, sizeof(lab), "Cura [%d/Mn%d]", 4, c2);
+        add_card(out, &n, max, CARD_SKILL_2, -1, 4, c2, budget, lab, "Cura 25% da vida");
+        snprintf(lab, sizeof(lab), "Escudo [%d/Mn%d]", 3, c2);
+        add_card(out, &n, max, CARD_SKILL_3, -1, 3, c2, budget, lab, "Absorve o proximo golpe");
+    }
+
+    if (suprema_pronta()) {
+        const char *sn = "Suprema";
+        if (jogador.classe == CLASSE_GUERREIRO) sn = "Devastacao";
+        else if (jogador.classe == CLASSE_LADINO) sn = "Combo";
+        else if (jogador.classe == CLASSE_MAGO) sn = "Inferno";
+        else sn = "Julgamento";
+        snprintf(lab, sizeof(lab), "%s [8]", sn);
+        add_card(out, &n, max, CARD_SUPREME, -1, 8, 0, budget, lab, "Carta definitiva da classe");
+        out[n - 1].enabled = budget >= 8;
+    }
+
+    for (s = 0; s < MOCHILA_TAM && itens < 2; s++) {
+        int icost;
+        if (jogador.mochila[s].id == ITEM_VAZIO) continue;
+        icost = (jogador.mochila[s].id == BOMBA) ? 3 : 2;
+        snprintf(lab, sizeof(lab), "%s [%d]", nome_item(jogador.mochila[s].id), icost);
+        add_card(out, &n, max, CARD_ITEM, s, icost, 0, budget, lab, desc_item(jogador.mochila[s].id));
+        itens++;
+    }
+
+    if (!is_boss) {
+        add_card(out, &n, max, CARD_FLEE, -1, 3, 0, budget, "Fugir [3]", "Tenta escapar da batalha");
+    }
+    return n;
+}
+
+static ActionResult executar_carta(struct inimigo *e, CardKind kind, int item_slot,
+                                   int *escudo, int *postura, int force) {
+    ActionResult r = empty_result();
+
+    if (kind == CARD_STRIKE) {
+        r = resolver_golpe_arma(e, "Golpe", 1.0f, force);
+        return r;
+    }
+
+    if (kind == CARD_SKILL_1) {
+        if (jogador.classe == CLASSE_GUERREIRO) {
+            r = resolver_golpe_arma(e, "Golpe Pesado", 2.2f, force);
+            return r;
+        }
+        if (jogador.classe == CLASSE_PALADINO) {
+            float esc = 1.1f + jogador.fe / 200.0f;
+            r = resolver_golpe_arma(e, "Julgar", esc, force);
+            if (!r.miss && jogador.fe >= 10) jogador.fe -= 10;
+            return r;
+        }
+        if (jogador.classe == CLASSE_LADINO) {
+            r = resolver_golpe_arma(e, "Punhalada", 1.35f, force);
+            return r;
+        }
+        {
+            int dmg, mx = 10;
+            r.spent_turn = 1;
+            dmg = 18 + jogador.nivel * 2 + jogador.arma.dano / 2;
+            if (!force) {
+                if (d20() < miss_min_jogador()) {
+                    r.miss = 1;
+                    r.pending_force = 1;
+                    snprintf(r.msg, MSG_LEN, "Bola de fogo errou. Forcar: +%d.", FORCE_HIT_COST);
+                    return r;
+                }
+                mx = multiplicador_x10(d20());
+                dmg = dmg * mx / 10;
+            }
+            e->vida -= dmg;
+            if (e->vida < 0) e->vida = 0;
+            r.damage = dmg;
+            r.mult_x10 = mx;
+            r.crit = mx >= 20;
+            preencher_dano_msg(&r, "Bola de fogo", force);
+            if (r.msg[0] && !r.miss) {
+                snprintf(r.msg2, MSG_LEN, "Ignora defesa");
+            }
+            suprema_ganhar(14);
+            if (suprema_pronta()) r.suprema_ready = 1;
+            return r;
+        }
+    }
+
+    if (kind == CARD_SKILL_2) {
+        r.spent_turn = 1;
+        if (jogador.classe == CLASSE_GUERREIRO) {
+            *postura = 1;
+            if (!usa_mana()) regenerar_recurso(1);
+            snprintf(r.msg, MSG_LEN, "Postura firme (proximo dano pela metade)");
+            suprema_ganhar(10);
+            return r;
+        }
+        if (jogador.classe == CLASSE_PALADINO) {
+            int cura = 8 + jogador.nivel;
+            jogador.fe += 25;
+            if (jogador.fe > FE_MAX) jogador.fe = FE_MAX;
+            jogador.vida += cura;
+            if (jogador.vida > jogador.vida_max) jogador.vida = jogador.vida_max;
+            r.heal = cura;
+            snprintf(r.msg, MSG_LEN, "Oracao: Fe %d  (+%d vida)", jogador.fe, cura);
+            suprema_ganhar(12);
+            return r;
+        }
+        if (jogador.classe == CLASSE_LADINO) {
+            r.skip_enemy = 1;
+            snprintf(r.msg, MSG_LEN, "Fumaca: o inimigo perde o turno");
+            suprema_ganhar(8);
+            return r;
+        }
+        {
+            int cura;
+            if (jogador.vida >= jogador.vida_max) {
+                snprintf(r.msg, MSG_LEN, "Sua vida esta cheia!");
+                r.spent_turn = 0;
+                return r;
+            }
+            cura = jogador.vida_max * 25 / 100;
+            cura += cura * jogador.arma.bonus_cura_pct / 100;
+            if (cura < 18) cura = 18;
+            jogador.vida += cura;
+            if (jogador.vida > jogador.vida_max) jogador.vida = jogador.vida_max;
+            r.heal = cura;
+            snprintf(r.msg, MSG_LEN, "Cura arcana (+%d)", cura);
+            suprema_ganhar(6);
+            return r;
+        }
+    }
+
+    if (kind == CARD_SKILL_3) {
+        r.spent_turn = 1;
+        if (jogador.classe == CLASSE_MAGO) {
+            *escudo = 1;
+            snprintf(r.msg, MSG_LEN, "Escudo arcano ativado");
+            suprema_ganhar(8);
+            return r;
+        }
+        if (jogador.energia >= jogador.energia_max) {
+            snprintf(r.msg, MSG_LEN, "Seu %s esta cheio!", nome_recurso());
+            r.spent_turn = 0;
+            return r;
+        }
+        regenerar_recurso(2);
+        snprintf(r.msg, MSG_LEN, "Descanso: +2 %s", nome_recurso());
+        return r;
+    }
+
+    if (kind == CARD_SUPREME) {
+        int i, total = 0;
+        r.spent_turn = 1;
+        jogador.suprema = 0;
+        if (jogador.classe == CLASSE_GUERREIRO) {
+            for (i = 0; i < 3; i++) {
+                int dmg = reduzir_dano((int)(jogador.arma.dano * 1.6f), e->defesa);
+                if (dmg < 1) dmg = 1;
+                e->vida -= dmg;
+                if (e->vida < 0) e->vida = 0;
+                total += dmg;
+                if (e->vida <= 0) break;
+            }
+            r.damage = total;
+            r.crit = 1;
+            snprintf(r.msg, MSG_LEN, "SUPREMA: Devastacao! -%d", total);
+        } else if (jogador.classe == CLASSE_LADINO) {
+            for (i = 0; i < 4; i++) {
+                int dmg = reduzir_dano(jogador.arma.dano, e->defesa);
+                if (dmg < 1) dmg = 1;
+                e->vida -= dmg;
+                if (e->vida < 0) e->vida = 0;
+                total += dmg;
+                if (e->vida <= 0) break;
+            }
+            r.damage = total;
+            r.crit = 1;
+            snprintf(r.msg, MSG_LEN, "SUPREMA: Combo! -%d (4 hits)", total);
+        } else if (jogador.classe == CLASSE_MAGO) {
+            total = 32 + jogador.nivel * 3 + jogador.arma.dano;
+            e->vida -= total;
+            if (e->vida < 0) e->vida = 0;
+            r.damage = total;
+            r.crit = 1;
+            snprintf(r.msg, MSG_LEN, "SUPREMA: Inferno! -%d (ignora DEF)", total);
+        } else {
+            int cura;
+            total = 22 + jogador.fe / 2;
+            total = reduzir_dano(total, e->defesa / 2);
+            e->vida -= total;
+            if (e->vida < 0) e->vida = 0;
+            cura = 15 + jogador.fe / 10;
+            jogador.vida += cura;
+            if (jogador.vida > jogador.vida_max) jogador.vida = jogador.vida_max;
+            jogador.fe = jogador.fe > 40 ? jogador.fe - 40 : 0;
+            r.damage = total;
+            r.heal = cura;
+            r.crit = 1;
+            snprintf(r.msg, MSG_LEN, "SUPREMA: Julgamento! -%d", total);
+            snprintf(r.msg2, MSG_LEN, "A Fe restaura +%d de vida", cura);
+        }
+        return r;
+    }
+
+    if (kind == CARD_ITEM) {
+        char msg[MSG_LEN];
+        if (!usar_item_slot(item_slot, e, 1, msg, sizeof(msg))) {
+            snprintf(r.msg, MSG_LEN, "%s", msg);
+            return r;
+        }
+        r.spent_turn = 1;
+        snprintf(r.msg, MSG_LEN, "%s", msg);
+        suprema_ganhar(4);
+        return r;
+    }
+
+    if (kind == CARD_FLEE) {
+        char msg[MSG_LEN];
+        r.spent_turn = 1;
+        if (tentar_fugir(msg, sizeof(msg))) {
+            r.special = 99;
+            snprintf(r.msg, MSG_LEN, "%s", msg);
+        } else {
+            r.end_player_turn = 1;
+            snprintf(r.msg, MSG_LEN, "%s", msg);
+        }
+        return r;
+    }
+
+    snprintf(r.msg, MSG_LEN, "Carta invalida");
+    return r;
+}
+
+ActionResult player_play_card(struct inimigo *e, const CombatCard *card, int *escudo, int *postura, int *budget) {
+    ActionResult r = empty_result();
+    if (!card || !budget) {
+        snprintf(r.msg, MSG_LEN, "Carta invalida");
+        return r;
+    }
+    if (*budget < card->cost) {
+        snprintf(r.msg, MSG_LEN, "Orcamento insuficiente (precisa %d)", card->cost);
+        return r;
+    }
+    if (jogador.energia < card->mp_cost) {
+        snprintf(r.msg, MSG_LEN, "Sem %s suficiente!", nome_recurso());
+        return r;
+    }
+
+    *budget -= card->cost;
+    jogador.energia -= card->mp_cost;
+    r = executar_carta(e, card->kind, card->item_slot, escudo, postura, 0);
+    if (!r.spent_turn) {
+        *budget += card->cost;
+        jogador.energia += card->mp_cost;
+        if (jogador.energia > jogador.energia_max) jogador.energia = jogador.energia_max;
+        return r;
+    }
+    if (r.pending_force) {
+        force_pending.active = 1;
+        force_pending.kind = card->kind;
+        force_pending.item_slot = card->item_slot;
+    } else {
+        memset(&force_pending, 0, sizeof(force_pending));
+    }
+    if (suprema_pronta()) r.suprema_ready = 1;
+    return r;
+}
+
+ActionResult player_force_pending(struct inimigo *e, int *escudo, int *postura, int *budget) {
+    ActionResult r = empty_result();
+    CardKind kind;
+    int slot;
+    if (!force_pending.active) {
+        snprintf(r.msg, MSG_LEN, "Nada para forcar");
+        return r;
+    }
+    if (!budget || *budget < FORCE_HIT_COST) {
+        snprintf(r.msg, MSG_LEN, "Sem orcamento para forcar (+%d)", FORCE_HIT_COST);
+        return r;
+    }
+    *budget -= FORCE_HIT_COST;
+    kind = force_pending.kind;
+    slot = force_pending.item_slot;
+    memset(&force_pending, 0, sizeof(force_pending));
+    r = executar_carta(e, kind, slot, escudo, postura, 1);
+    r.forced = 1;
+    r.pending_force = 0;
+    return r;
+}
+
+void player_cancel_force(void) {
+    memset(&force_pending, 0, sizeof(force_pending));
+}
+
 ActionResult enemy_attack(struct inimigo *e, int *escudo, int *postura, int turno) {
     ActionResult r = empty_result();
     int roll = d20();
@@ -513,6 +971,18 @@ ActionResult enemy_attack(struct inimigo *e, int *escudo, int *postura, int turn
     int especial = 0;
 
     r.spent_turn = 1;
+
+    if (e->eh_boss && boss_alerta_suprema) {
+        boss_alerta_suprema = 0;
+        if (d20() <= 10) {
+            r.miss = 1;
+            r.special = 21;
+            snprintf(r.msg, MSG_LEN, "O boss hesita diante da sua Suprema!");
+            return r;
+        }
+        dmg += dmg / 3;
+        especial = 22;
+    }
 
     if (e->eh_boss && e->tipo == 1 && fugas_totais >= 3) {
         dmg = dmg + dmg / 2;
@@ -568,6 +1038,9 @@ ActionResult enemy_attack(struct inimigo *e, int *escudo, int *postura, int turn
     } else if (especial == 2) {
         snprintf(r.msg, MSG_LEN, "O Golem pisoteia voce!");
         r.special = 2;
+    } else if (especial == 22) {
+        snprintf(r.msg, MSG_LEN, "O boss contra-ataca a sua Suprema!");
+        r.special = 22;
     } else if (e->eh_boss && e->tipo == 1 && fugas_totais >= 3) {
         snprintf(r.msg, MSG_LEN, "O Vazio sorri para as suas fugas...");
         r.special = 3;
@@ -592,9 +1065,10 @@ ActionResult enemy_attack(struct inimigo *e, int *escudo, int *postura, int turn
 
 int tentar_fugir(char *message, int msg_len) {
     int alvo = 12;
-    int roll = d20() + jogador.arma.bonus_fuga + jogador.bonus_acerto;
+    int roll = d20() + jogador.arma.bonus_fuga + jogador.bonus_acerto + jogador.iniciativa / 8;
     if (jogador.classe == CLASSE_LADINO) roll += 2;
     if (jogador.classe == CLASSE_GUERREIRO) roll -= 2;
+    if (jogador.classe == CLASSE_PALADINO) roll += 1;
 
     if (roll >= alvo) {
         fugas_totais++;
@@ -616,7 +1090,9 @@ void aplicar_stats_nivel(void) {
     niveis_desde_boss += 1;
     jogador.xp_para_proximo = 40 + jogador.nivel * 15;
 
-    extra_vida = (jogador.classe == CLASSE_GUERREIRO) ? 12 : (jogador.classe == CLASSE_LADINO) ? 8 : 5;
+    extra_vida = (jogador.classe == CLASSE_PALADINO) ? 14 :
+                 (jogador.classe == CLASSE_GUERREIRO) ? 12 :
+                 (jogador.classe == CLASSE_LADINO) ? 8 : 5;
     jogador.vida_max += extra_vida;
     if (jogador.classe == CLASSE_MAGO || jogador.nivel % 2 == 0) {
         jogador.energia_max += 1;
